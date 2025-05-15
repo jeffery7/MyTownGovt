@@ -1,0 +1,12 @@
+homepage_url: "https://www.mytowngovernment.org/01031"
+debug: true
+force_redownload: true
+board_limit: 0
+past_meeting_limit: 10
+target_boards: ["Planning Board"]
+year: null
+meeting_date: "Sep 10, 2024"
+max_board_workers: 3
+max_meeting_workers: 3
+retry_attempts: 3
+retry_wait_seconds: 5

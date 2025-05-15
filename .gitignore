@@ -1,0 +1,90 @@
+# Python-specific files and directories
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+virtualenv/
+ENV/
+
+# Pip and package management
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# IDE and editor files
+.vscode/
+*.code-workspace
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Project-specific files
+Hardwick_Data/*
+Archive_Code/*
+GROK_Prompts.txt
+
+# Sensitive configuration files (if any)
+.env
+*.key
+*.pem
+*.crt
+secrets.yaml
+credentials.yaml
+
+# Logs and temporary files
+*.log
+*.log.*
+*.tmp
+temp/
+tmp/
+
+# Dependency lock files (optional, include if you want to track them)
+# requirements.txt
+# Pipfile.lock
+
+# Miscellaneous
+*.bak
+*.gho
+*.ori
+*.orig
+*.rej
