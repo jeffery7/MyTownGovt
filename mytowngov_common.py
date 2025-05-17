@@ -1,290 +1,189 @@
-import requests
-from bs4 import BeautifulSoup
-import logging
+#!/usr/bin/env python3
 import os
-import subprocess
-import re
+import yaml
+import logging
+import hashlib
 import time
-from urllib.parse import urljoin
-from datetime import datetime
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from PIL import Image
 import img2pdf
-import PyPDF2
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-import tempfile
-import yaml
-import dateutil.parser
-import hashlib
-import io
-import csv
-import shutil
+import requests
 
-def fetch_page_content(url, driver, logger, force_redownload=False, error_tracker=None, full_page=False):
-    """
-    Fetch page content using Selenium WebDriver.
+# Logging setup
+def setup_logging(config):
+    log_file = config.get('log_file', 'Hardwick_Data/scraper.log')
+    error_log_file = config.get('error_log_file', 'Hardwick_Data/errors.log')
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    os.makedirs(os.path.dirname(error_log_file), exist_ok=True)
     
-    Args:
-        url (str): URL to fetch.
-        driver: Selenium WebDriver instance.
-        logger: Logger instance.
-        force_redownload (bool): Force fetching even if cached.
-        error_tracker: ErrorTracker instance.
-        full_page (bool): Capture full page content.
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
     
-    Returns:
-        str: HTML content or None if failed.
-    """
-    logger.info(f"Fetching page: {url}")
-    cache_dir = "Hardwick_Data/cache"
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_filename = os.path.join(cache_dir, f"{hashlib.md5(url.encode()).hexdigest()}.html")
-    
-    if not force_redownload and os.path.exists(cache_filename):
-        try:
-            with open(cache_filename, 'r', encoding='utf-8') as f:
-                logger.debug(f"Using cached content for {url}")
-                return f.read()
-        except Exception as e:
-            logger.warning(f"Error reading cache for {url}: {e}")
-    
-    attempts = 0
-    max_attempts = 3
-    while attempts < max_attempts:
-        try:
-            driver.get(url)
-            time.sleep(3)  # Allow page to load
-            if full_page:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1)  # Ensure scroll completes
-            html = driver.page_source
-            if html:
-                try:
-                    with open(cache_filename, 'w', encoding='utf-8') as f:
-                        f.write(html)
-                    logger.debug(f"Cached content for {url}")
-                except Exception as e:
-                    logger.warning(f"Error caching content for {url}: {e}")
-                return html
-            logger.warning(f"Empty content fetched for {url}, attempt {attempts + 1}/{max_attempts}")
-            attempts += 1
-        except Exception as e:
-            logger.warning(f"Error fetching {url}: {e}, attempt {attempts + 1}/{max_attempts}")
-            attempts += 1
-            time.sleep(1)
-    
-    logger.error(f"Failed to fetch {url} after {max_attempts} attempts")
-    if error_tracker:
-        error_tracker.add_error('FetchError', f"Failed to fetch page after {max_attempts} attempts", url, retry_count=attempts)
-    return None
-
-def sanitize_directory_name(name):
-    """
-    Sanitize a string to be safe for use as a directory name.
-    
-    Args:
-        name (str): Input string.
-    
-    Returns:
-        str: Sanitized string.
-    """
-    if not name:
-        return "Unknown"
-    name = re.sub(r'[^\w\s-]', '', name.strip())
-    name = re.sub(r'\s+', '_', name)
-    return name or "Unknown"
-
-def sanitize_filename(name):
-    """
-    Sanitize a string to be safe for use as a filename.
-    
-    Args:
-        name (str): Input string.
-    
-    Returns:
-        str: Sanitized string.
-    """
-    if not name:
-        return "unknown"
-    name = re.sub(r'[^\w\s-]', '', name.strip())
-    name = re.sub(r'\s+', '_', name)
-    return name or "unknown"
-
-def parse_time_to_timestamp(time_str, logger, error_tracker=None):
-    """
-    Parse a time string to a timestamp.
-    
-    Args:
-        time_str (str): Time string to parse.
-        logger: Logger instance.
-        error_tracker: ErrorTracker instance.
-    
-    Returns:
-        str: Formatted timestamp (YYYY-MM-DD HH:MM:SS) or None if parsing fails.
-    """
-    if not time_str or time_str.strip() == '':
-        logger.warning("Empty time string provided")
-        if error_tracker:
-            error_tracker.add_error('TimeParseError', "Empty time string", time_str)
-        return None
-    try:
-        time_str = re.sub(r'\s+', ' ', time_str.strip())
-        match = re.match(r'(\w+\s+\d{1,2},\s+\d{4})(?:,?\s*(\d{1,2}:\d{2}\s*[AP]M\s*[A-Z]+)?)?', time_str)
-        if match:
-            date_part, time_part = match.groups()
-            time_str = f"{date_part} {time_part}" if time_part else f"{date_part} 00:00:00"
-        parsed_time = dateutil.parser.parse(time_str, fuzzy=True)
-        timestamp = parsed_time.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"Parsed '{time_str}' to {timestamp}")
-        return timestamp
-    except ValueError as e:
-        logger.error(f"Error parsing time '{time_str}': {e}")
-        if error_tracker:
-            error_tracker.add_error('TimeParseError', f"Error parsing time: {e}", time_str)
-        return None
-
-def setup_logging(debug=False):
-    """
-    Set up logging configuration.
-    
-    Args:
-        debug (bool): Enable debug logging.
-    
-    Returns:
-        logging.Logger: Configured logger.
-    """
-    logger = logging.getLogger('scraper')
-    logger.setLevel(logging.DEBUG if debug else logging.INFO)
-    
+    # Console handler
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
     console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
     console_handler.setFormatter(console_formatter)
     
-    os.makedirs("Hardwick_Data", exist_ok=True)
-    file_handler = logging.FileHandler("Hardwick_Data/scraper.log", encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
-    file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-    file_handler.setFormatter(file_formatter)
+    # File handler for general logs
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(console_formatter)
     
-    if not logger.handlers:
-        logger.addHandler(console_handler)
-        logger.addHandler(file_handler)
+    # File handler for errors
+    error_handler = logging.FileHandler(error_log_file, encoding='utf-8')
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(console_formatter)
     
+    logger.handlers = [console_handler, file_handler, error_handler]
     return logger
 
-def save_to_csv(data, output_file, fieldnames, logger, error_tracker):
-    """
-    Save data to a CSV file.
-    
-    Args:
-        data (list): List of dictionaries to save.
-        output_file (str): Output CSV file path.
-        fieldnames (list): List of field names for CSV headers.
-        logger: Logger instance.
-        error_tracker: ErrorTracker instance.
-    """
-    try:
-        mode = 'a' if os.path.exists(output_file) else 'w'
-        with open(output_file, mode, newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-            if mode == 'w':
-                writer.writeheader()
-            writer.writerows(data)
-        logger.info(f"Saved {len(data)} rows to {output_file}")
-    except Exception as e:
-        logger.error(f"Error saving CSV {output_file}: {e}")
-        if error_tracker:
-            error_tracker.add_error('CSVWriteError', f"Error saving CSV: {e}", output_file)
+# Load configuration
+def load_config(config_path='config.yaml'):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    setup_logging(config)
+    return config
 
-def generate_pdf_screenshot(url, output_path, driver, logger, error_tracker, extracted_text, save_png_path=None):
-    """
-    Generate a PDF screenshot of a webpage with a searchable text layer and optional PNG output.
-    
-    Args:
-        url (str): URL to capture.
-        output_path (str): Output PDF path.
-        driver: Selenium WebDriver instance.
-        logger: Logger instance.
-        error_tracker: ErrorTracker instance.
-        extracted_text (list): List of text strings for searchable layer.
-        save_png_path (str, optional): Path to save PNG screenshot.
-    """
-    logger.info(f"Generating PDF screenshot for {url} at {output_path}")
+# Cache utilities
+class Cache:
+    def __init__(self, config):
+        self.enabled = config.get('cache', {}).get('enabled', False)
+        self.cache_dir = config.get('cache', {}).get('directory', 'cache')
+        self.ttl_hours = config.get('cache', {}).get('ttl_hours', 24)
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def get_cache_key(self, url):
+        return hashlib.md5(url.encode()).hexdigest()
+
+    def cache_path(self, key, ext='html'):
+        return os.path.join(self.cache_dir, f"{key}.{ext}")
+
+    def is_cached(self, url):
+        if not self.enabled:
+            return False
+        cache_file = self.cache_path(self.get_cache_key(url))
+        if not os.path.exists(cache_file):
+            return False
+        cache_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
+        return (datetime.now() - cache_time) < timedelta(hours=self.ttl_hours)
+
+    def get_cached(self, url):
+        cache_file = self.cache_path(self.get_cache_key(url))
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    def cache_content(self, url, content):
+        if not self.enabled:
+            return
+        cache_file = self.cache_path(self.get_cache_key(url))
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+# Iframe utilities
+def has_iframe(driver, iframe_name='content'):
     try:
-        driver.get(url)
-        time.sleep(3)
+        driver.find_element(By.ID, iframe_name)
+        return True
+    except:
+        try:
+            driver.find_element(By.NAME, iframe_name)
+            return True
+        except:
+            return False
+
+# Screenshot utilities
+def take_full_screenshot(driver, output_path, config, prefix='screenshot'):
+    logger = logging.getLogger(__name__)
+    logger.debug("Taking full screenshot")
+    os.makedirs(output_path, exist_ok=True)
+    try:
+        # Check for content iframe
+        iframe_exists = has_iframe(driver, 'content')
+        if iframe_exists:
+            logger.debug("Switching to content iframe")
+            driver.switch_to.frame('content')
+        
+        # Get full scroll height
+        scroll_height = driver.execute_script("return document.body.scrollHeight")
+        driver.set_window_size(1920, scroll_height + 100)  # Add padding
+        
+        # Scroll to capture full page
         driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)  # Wait for rendering
         
-        viewport_height = 1080
-        driver.set_window_size(1920, viewport_height)
+        # Save PNG
+        timestamp = int(time.time())
+        png_path = os.path.join(output_path, f"{prefix}_{timestamp}.png")
+        driver.save_screenshot(png_path)
+        logger.info(f"Saved PNG screenshot: {png_path}")
         
-        screenshot_path = output_path.replace('.pdf', '.png')
-        driver.save_screenshot(screenshot_path)
-        logger.debug(f"Saved screenshot: {screenshot_path}")
-        
-        img = Image.open(screenshot_path)
-        width, height = img.size
-        cropped_img = img.crop((0, 100, width, min(height, viewport_height)))
-        cropped_path = screenshot_path.replace('.pdf', '_cropped.png')
-        cropped_img.save(cropped_path)
-        logger.debug(f"Cropped screenshot to {cropped_path}")
-        
-        if save_png_path and save_png_path != cropped_path:
-            shutil.copy2(cropped_path, save_png_path)
-            logger.info(f"Saved PNG screenshot to {save_png_path}")
-        elif save_png_path:
-            logger.debug(f"Skipped copying PNG as cropped_path and save_png_path are the same: {save_png_path}")
-        
-        pdf_path = output_path.replace('.pdf', '.image_temp.pdf')
+        # Convert to PDF
+        pdf_path = png_path.replace('.png', '.pdf')
         with open(pdf_path, 'wb') as f:
-            f.write(img2pdf.convert(cropped_path))
-        logger.debug(f"Converted screenshot to PDF: {pdf_path}")
+            f.write(img2pdf.convert(png_path))
+        logger.info(f"Saved PDF screenshot: {pdf_path}")
         
-        text_pdf_path = output_path.replace('.pdf', '.text_temp.pdf')
-        c = canvas.Canvas(text_pdf_path, pagesize=letter)
-        y_position = 800
-        for text in extracted_text:
-            if y_position < 50:
-                c.showPage()
-                y_position = 800
-            c.drawString(10, y_position, text[:100])
-            y_position -= 12
-        c.save()
-        logger.debug(f"Created text layer PDF: {text_pdf_path}")
-        
-        merger = PyPDF2.PdfMerger()
-        merger.append(pdf_path)
-        merger.append(text_pdf_path)
-        merger.write(output_path)
-        merger.close()
-        logger.info(f"Generated PDF: {output_path} ({os.path.getsize(output_path)} bytes)")
-        
-        for path in [screenshot_path, cropped_path, pdf_path, text_pdf_path]:
-            if os.path.exists(path):
-                os.remove(path)
-                logger.debug(f"Removed temporary file: {path}")
-                
+        # Switch back to default content if iframe was used
+        if iframe_exists:
+            driver.switch_to.default_content()
+        return png_path, pdf_path
     except Exception as e:
-        logger.error(f"Error generating PDF screenshot for {url}: {e}")
-        error_tracker.add_error('PDFGenerationError', f"Error generating PDF screenshot: {e}", url)
+        logger.error(f"Error taking screenshot: {str(e)}", exc_info=True)
+        return None, None
 
-def load_config(config_file):
-    """
-    Load configuration from a YAML file and log its content.
+# Selenium setup
+def setup_driver():
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--window-size=1920,4000')
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
+
+# Fetch page with caching and retries
+def fetch_page(driver, url, cache, retries=3, delay=5):
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Fetching page: {url}")
+    if cache.is_cached(url):
+        logger.info(f"Using cached content for {url}")
+        return cache.get_cached(url)
     
-    Args:
-        config_file (str): Path to the YAML configuration file.
-    
-    Returns:
-        dict: Configuration dictionary, or empty dict if loading fails.
-    """
-    logger = logging.getLogger('scraper')
-    try:
-        with open(config_file, "r") as f:
-            config = yaml.safe_load(f)
-            logger.info(f"Loaded config.yaml: {config}")
-            return config
-    except Exception as e:
-        logger.error(f"Error loading config file {config_file}: {e}")
-        return {}
+    for attempt in range(retries):
+        try:
+            driver.get(url)
+            WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+            
+            # Save raw HTML for debugging
+            debug_path = os.path.join(cache.cache_dir, 'debug', f"fetch_{hashlib.md5(url.encode()).hexdigest()}_{int(time.time())}.html")
+            os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            logger.info(f"Saved debug HTML: {debug_path}")
+            
+            # Check for content iframe
+            iframe_exists = has_iframe(driver, 'content')
+            if iframe_exists:
+                logger.debug("Switching to content iframe")
+                driver.switch_to.frame('content')
+                content = driver.page_source
+                driver.switch_to.default_content()
+            else:
+                logger.debug("No content iframe found, using default content")
+                content = driver.page_source
+            
+            cache.cache_content(url, content)
+            return content
+        except Exception as e:
+            logger.warning(f"Fetch attempt {attempt + 1}/{retries} failed for {url}: {str(e)}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                logger.error(f"Failed to fetch {url} after {retries} attempts: {str(e)}", exc_info=True)
+                raise
