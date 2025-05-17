@@ -1,22 +1,36 @@
-town: Hardwick
-state: MA
-zip: "01031"
-base_url: https://www.mytowngovernment.org
-data_dir: Hardwick_Data
-log_level: DEBUG
-log_file: Hardwick_Data/scraper.log
-error_log_file: Hardwick_Data/errors.log
+# General settings
+data_dir: "Hardwick_Data"
+debug: true
+cache_dir: "Hardwick_Data/cache"
+screenshot_dir: "Hardwick_Data/screenshots"
+log_file: "Hardwick_Data/scraper.log"
+error_log_file: "Hardwick_Data/errors.log"
+base_url: "https://www.mytowngovernment.org/01031"
+
+# Cache settings
 cache:
   enabled: true
-  directory: Hardwick_Data/cache
+  directory: "Hardwick_Data/cache"
   ttl_hours: 24
+
+# Screenshot settings
 screenshots:
   enabled: true
-  format: [png, pdf]
-  directory: screenshots
-boards:
-  - name: Planning_Board
-    url: https://www.mytowngovernment.org/board?board=ahNzfnRvd25nb3Zlcm5tZW50LWhychILEgpCb2FyZE1vZGVsGLnYFAw
-    meetings:
-      - date: 2024-09-10 18:30:00
-        url: https://www.mytowngovernment.org/meeting?meeting=ahNzfnRvd25nb3Zlcm5tZW50LWhychkLEgxNZWV0aW5nTW9kZWwYgIDAoeWjgwkM
+
+# Homepage Scraper settings
+homepage_url: "https://www.mytowngovernment.org/01031"
+homepage_boards_csv: "Hardwick_Data/homepage_boards_and_committees.csv"
+homepage_agencies_csv: "Hardwick_Data/homepage_outside_agencies.csv"
+
+# Board Scraper settings
+boards_input_csv: "Hardwick_Data/homepage_boards_and_committees.csv"
+boards_output_csv: "Hardwick_Data/board_meetings.csv"
+focus_mode_boards: true
+focus_board: "Planning Board"
+
+# Meeting Scraper settings
+meetings_input_csv: "Hardwick_Data/board_meetings.csv"
+meetings_output_csv: "Hardwick_Data/meeting_details.csv"
+attachments_dir: "Hardwick_Data/attachments"
+focus_mode_meetings: true
+focus_date: "2024-09-10"

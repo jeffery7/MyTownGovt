@@ -15,74 +15,79 @@ from mytowngov_common import load_config, setup_driver, fetch_page, take_full_sc
 logger = logging.getLogger(__name__)
 
 class BoardScraper:
-    def __init__(self, config):
-        self.config = config
-        self.data_dir = config['data_dir']
-        self.base_url = config['base_url']
-        self.cache = Cache(config)
+    def __init__(self, config_path='config.yaml'):
+        self.config = load_config(config_path)
+        self.data_dir = self.config['data_dir']
+        self.cache = Cache(self.config)
         self.driver = setup_driver()
-        self.screenshots_enabled = config.get('screenshots', {}).get('enabled', False)
-        self.board_csv = os.path.join(self.data_dir, 'homepage_boards_and_committees.csv')
-        self.target_board = 'Planning_Board'  # Consistent with config.yaml
-        self.board_dir = os.path.join(self.data_dir, self.target_board)
-        os.makedirs(self.board_dir, exist_ok=True)
+        self.wait = WebDriverWait(self.driver, 15)
+        self.screenshots_enabled = self.config.get('screenshots', {}).get('enabled', True)
+        self.input_csv = self.config['boards_input_csv']
+        self.output_csv = self.config['boards_output_csv']
 
     def scrape_boards(self):
-        if not os.path.exists(self.board_csv):
-            logger.error(f"Board CSV not found: {self.board_csv}")
+        if not os.path.exists(self.input_csv):
+            logger.error(f"Board CSV not found: {self.input_csv}")
             return None
         
-        boards_df = pd.read_csv(self.board_csv)
-        # Validate CSV columns
-        expected_columns = ['Name', 'Chair', 'Clerk', 'URL']
+        boards_df = pd.read_csv(self.input_csv)
+        expected_columns = ['Name', 'URL']
         if not all(col in boards_df.columns for col in expected_columns):
-            logger.error(f"CSV {self.board_csv} missing required columns: {expected_columns}, found: {list(boards_df.columns)}")
+            logger.error(f"CSV {self.input_csv} missing required columns: {expected_columns}, found: {list(boards_df.columns)}")
             return None
         
-        # Log CSV contents
         logger.debug(f"Board CSV contents:\n{boards_df.to_string()}")
-        
         board_data = []
         
-        # Normalize board names by replacing underscores with spaces and doing case-insensitive comparison
-        target_board_normalized = self.target_board.replace('_', ' ').lower()
-        boards_df['Name_normalized'] = boards_df['Name'].str.replace('_', ' ').str.lower()
-        board_row = boards_df[boards_df['Name_normalized'] == target_board_normalized]
-        
-        if board_row.empty:
-            logger.error(f"Board {self.target_board} not found in CSV. Available boards: {boards_df['Name'].tolist()}")
-            return None
-        
-        board = board_row.iloc[0]
-        logger.info(f"Scraping board: {board['Name']}")
-        board_info = self._scrape_board(board['URL'])
-        if board_info:
-            board_data.append(board_info)
-            self._save_meeting_csv(board_info['meetings'], board['Name'])
+        # Filter boards based on focus mode
+        boards_to_scrape = []
+        if self.config.get('focus_mode_boards', False):
+            target_board = self.config.get('focus_board', '').replace(' ', '_')
+            boards_df['Name_normalized'] = boards_df['Name'].str.replace(' ', '_').str.lower()
+            target_board_normalized = target_board.lower()
+            board_row = boards_df[boards_df['Name_normalized'] == target_board_normalized]
+            if board_row.empty:
+                logger.error(f"Board {target_board} not found in CSV. Available boards: {boards_df['Name'].tolist()}")
+                return None
+            boards_to_scrape = [board_row.iloc[0]]
+            logger.info(f"Focus mode enabled, scraping only: {target_board}")
+        else:
+            boards_to_scrape = boards_df.to_dict('records')
+            logger.info("Scraping all boards")
+
+        for board in boards_to_scrape:
+            board_name = board['Name'].replace(' ', '_')
+            board_url = board['URL']
+            logger.info(f"Scraping board: {board_name}")
+            board_info = self._scrape_board(board_name, board_url)
+            if board_info:
+                board_data.append(board_info)
+                self._save_meeting_csv(board_info['meetings'], board_name)
         
         return board_data
 
-    def _scrape_board(self, board_url):
+    def _scrape_board(self, board_name, board_url):
         logger.info(f"Scraping board page: {board_url}")
         try:
-            # Fetch page with caching
+            # Create board-specific directory
+            board_dir = os.path.join(self.data_dir, board_name)
+            os.makedirs(board_dir, exist_ok=True)
+
             content = fetch_page(self.driver, board_url, self.cache)
             
-            # Take screenshot
             screenshot_data = {}
             if self.screenshots_enabled:
-                png_path, pdf_path = take_full_screenshot(self.driver, self.board_dir, self.config, prefix='board_screenshot')
+                safe_board_name = board_name.replace(' ', '_').replace('/', '_')
+                png_path, pdf_path = take_full_screenshot(self.driver, board_dir, self.config, prefix=f"board_{safe_board_name}")
                 if png_path and pdf_path:
                     screenshot_data = {'png_path': png_path, 'pdf_path': pdf_path}
                     logger.info(f"Board screenshot saved: PNG={png_path}, PDF={pdf_path}")
             
-            # Check for content iframe
             iframe_exists = has_iframe(self.driver, 'content')
             if iframe_exists:
                 logger.debug("Switching to content iframe")
                 self.driver.switch_to.frame('content')
             
-            # Scrape board details
             board_info = {
                 'url': board_url,
                 'name': self._get_element_text('.board-name'),
@@ -91,12 +96,10 @@ class BoardScraper:
                 'meetings': []
             }
             
-            # Scrape meeting tables
             for selector in ['.upcoming-meetings-table', '.past-meetings-table', 'table.meetings', 'div.meetings table']:
                 table = self.driver.find_elements(By.CSS_SELECTOR, selector)
                 if table:
-                    # Save table HTML for debugging
-                    debug_path = os.path.join(self.board_dir, 'debug', f"meetings_table_{selector.replace('.', '_')}_{int(time.time())}.html")
+                    debug_path = os.path.join(board_dir, 'debug', f"meetings_table_{selector.replace('.', '_')}_{int(time.time())}.html")
                     os.makedirs(os.path.dirname(debug_path), exist_ok=True)
                     with open(debug_path, 'w', encoding='utf-8') as f:
                         f.write(table[0].get_attribute('outerHTML'))
@@ -108,12 +111,12 @@ class BoardScraper:
             if iframe_exists:
                 self.driver.switch_to.default_content()
             board_info['screenshots'] = screenshot_data
-            logger.info(f"Scraped {len(board_info['meetings'])} meetings for board")
+            logger.info(f"Scraped {len(board_info['meetings'])} meetings for board {board_name}")
             return board_info
         except Exception as e:
             logger.error(f"Error scraping board {board_url}: {str(e)}", exc_info=True)
-            # Save raw HTML for debugging
-            debug_path = os.path.join(self.board_dir, 'debug', f"board_{int(time.time())}.html")
+            board_dir = os.path.join(self.data_dir, board_name)
+            debug_path = os.path.join(board_dir, 'debug', f"board_{board_name}_{int(time.time())}.html")
             os.makedirs(os.path.dirname(debug_path), exist_ok=True)
             with open(debug_path, 'w', encoding='utf-8') as f:
                 f.write(self.driver.page_source)
@@ -124,12 +127,11 @@ class BoardScraper:
         meetings = []
         try:
             rows = table.find_elements(By.TAG_NAME, 'tr')
-            for row in rows[1:]:  # Skip header
+            for row in rows[1:]:
                 cells = row.find_elements(By.TAG_NAME, 'td')
                 if len(cells) >= 3:
                     try:
                         date_time = cells[0].text.strip()
-                        # Skip non-date entries
                         if not date_time or any(keyword in date_time.lower() for keyword in ['time', 'committee', 'board']):
                             logger.debug(f"Skipping non-date entry: {date_time}")
                             continue
@@ -157,7 +159,7 @@ class BoardScraper:
 
     def _get_element_text(self, selector):
         try:
-            element = WebDriverWait(self.driver, 5).until(
+            element = self.wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, selector))
             )
             return element.text.strip()
@@ -168,19 +170,20 @@ class BoardScraper:
         if not meetings:
             logger.warning(f"No meetings to save for {board_name}")
             return
-        csv_path = os.path.join(self.board_dir, 'board_meeting_data.csv')
+        board_dir = os.path.join(self.data_dir, board_name)
+        os.makedirs(board_dir, exist_ok=True)
+        csv_path = os.path.join(board_dir, 'board_meeting_data.csv')
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['date', 'location', 'status', 'details_url'])
             writer.writeheader()
             writer.writerows(meetings)
-        logger.info(f"Saved meeting CSV: {csv_path}")
+        logger.info(f"Saved meeting CSV for {board_name}: {csv_path}")
 
     def close(self):
         self.driver.quit()
 
 def main():
-    config = load_config()
-    scraper = BoardScraper(config)
+    scraper = BoardScraper()
     try:
         result = scraper.scrape_boards()
         if result:
