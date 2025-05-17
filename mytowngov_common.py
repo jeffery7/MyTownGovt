@@ -85,6 +85,17 @@ class Cache:
         with open(cache_file, 'w', encoding='utf-8') as f:
             f.write(content)
 
+    def is_valid_cached_content(self, url):
+        """Check if the cached content is valid (not empty and contains meaningful data)."""
+        if not self.is_cached(url):
+            return False
+        content = self.get_cached(url)
+        # Check if the content is empty or just a blank HTML page
+        if not content or '<body></body>' in content or len(content.strip()) < 100:
+            logger.warning(f"Cached content for {url} is empty or invalid")
+            return False
+        return True
+
 # Iframe utilities
 def has_iframe(driver, iframe_name='content'):
     try:
@@ -138,9 +149,10 @@ def take_full_screenshot(driver, output_path, config, prefix='screenshot'):
         return None, None
 
 # Selenium setup
-def setup_driver():
+def setup_driver(headless=True):
     chrome_options = Options()
-    chrome_options.add_argument('--headless=new')
+    if headless:
+        chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--window-size=1920,4000')
@@ -148,18 +160,30 @@ def setup_driver():
     return driver
 
 # Fetch page with caching and retries
-def fetch_page(driver, url, cache, retries=3, delay=5):
+def fetch_page(driver, url, cache, retries=3, delay=5, bypass_cache=False):
     logger = logging.getLogger(__name__)
     logger.debug(f"Fetching page: {url}")
-    if cache.is_cached(url):
+
+    # Check cache first, unless bypassing
+    if not bypass_cache and cache.is_valid_cached_content(url):
         logger.info(f"Using cached content for {url}")
         return cache.get_cached(url)
     
     for attempt in range(retries):
         try:
             driver.get(url)
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+            # Wait for the page to load and verify content
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, 'body'))
+            )
+            # Additional wait for JavaScript rendering
+            time.sleep(2)
             
+            # Verify that the page has meaningful content
+            body_content = driver.find_element(By.TAG_NAME, 'body').get_attribute('innerHTML').strip()
+            if not body_content or '<body></body>' in driver.page_source:
+                raise ValueError("Page loaded but contains no meaningful content")
+
             # Save raw HTML for debugging
             debug_path = os.path.join(cache.cache_dir, 'debug', f"fetch_{hashlib.md5(url.encode()).hexdigest()}_{int(time.time())}.html")
             os.makedirs(os.path.dirname(debug_path), exist_ok=True)
@@ -178,6 +202,10 @@ def fetch_page(driver, url, cache, retries=3, delay=5):
                 logger.debug("No content iframe found, using default content")
                 content = driver.page_source
             
+            # Verify content before caching
+            if '<body></body>' in content or len(content.strip()) < 100:
+                raise ValueError("Fetched content is empty or invalid")
+
             cache.cache_content(url, content)
             return content
         except Exception as e:
