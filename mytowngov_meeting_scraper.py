@@ -18,49 +18,75 @@ logger = logging.getLogger(__name__)
 class MeetingScraper:
     def __init__(self, config_path='config.yaml'):
         self.config = load_config(config_path)
+        logger.debug(f"Loaded configuration: {self.config}")
         self.data_dir = self.config['data_dir']
         self.cache = Cache(self.config)
         self.driver = setup_driver()
         self.wait = WebDriverWait(self.driver, 15)
         self.screenshots_enabled = self.config.get('screenshots', {}).get('enabled', True)
-        self.input_csv = self.config['meetings_input_csv']
         self.output_csv = self.config['meetings_output_csv']
+        self.focus_mode = self.config.get('focus_mode_meetings', False)
+        self.focus_date = self.config.get('focus_date')
+        self.focus_board = self.config.get('focus_board', None)
 
     def scrape_meetings(self):
-        if not os.path.exists(self.input_csv):
-            logger.error(f"Meeting CSV not found: {self.input_csv}")
-            return None
-
-        meetings_df = pd.read_csv(self.input_csv)
-        expected_columns = ['board_name', 'date', 'details_url']
-        if not all(col in meetings_df.columns for col in expected_columns):
-            logger.error(f"CSV {self.input_csv} missing required columns: {expected_columns}, found: {list(meetings_df.columns)}")
-            return None
-
-        logger.debug(f"Meeting CSV contents:\n{meetings_df.to_string()}")
+        logger.info("Starting meeting scraping")
         meeting_data = []
 
-        meetings_to_scrape = []
-        if self.config.get('focus_mode_meetings', False):
-            focus_date = self.config.get('focus_date')
-            meetings_to_scrape = meetings_df[meetings_df['date'].str.startswith(focus_date)].to_dict('records')
-            logger.info(f"Focus mode enabled, scraping only meetings on: {focus_date}")
-        else:
-            meetings_to_scrape = meetings_df.to_dict('records')
-            logger.info("Scraping all meetings")
+        # If in focus mode, only process the specified board
+        boards = [self.focus_board] if self.focus_mode and self.focus_board else self._get_all_boards()
 
-        for meeting in meetings_to_scrape:
-            board_name = meeting['board_name']
-            meeting_url = meeting['details_url']
-            meeting_date = meeting['date']
-            logger.info(f"Scraping meeting: {meeting_url}")
-            result = self.scrape_meeting(board_name, meeting_url, meeting_date)
-            if result:
-                meeting_data.append(result)
+        for board_name in boards:
+            input_csv = os.path.join(self.data_dir, board_name, 'board_meeting_data.csv')
+            logger.debug(f"Checking for meeting CSV: {input_csv}")
+
+            if not os.path.exists(input_csv):
+                logger.error(f"Meeting CSV not found for board {board_name}: {input_csv}")
+                continue
+
+            try:
+                meetings_df = pd.read_csv(input_csv)
+                logger.debug(f"Loaded CSV for {board_name}:\n{meetings_df.to_string()}")
+            except Exception as e:
+                logger.error(f"Error reading CSV {input_csv}: {e}")
+                continue
+
+            expected_columns = ['board_name', 'date', 'details_url']
+            if not all(col in meetings_df.columns for col in expected_columns):
+                logger.error(f"CSV {input_csv} missing required columns: {expected_columns}, found: {list(meetings_df.columns)}")
+                continue
+
+            meetings_to_scrape = meetings_df
+            if self.focus_mode and self.focus_date:
+                meetings_to_scrape = meetings_df[meetings_df['date'].str.contains(self.focus_date, na=False)]
+                logger.debug(f"Focus mode enabled, filtered to {len(meetings_to_scrape)} meetings for date: {self.focus_date}")
+
+            for meeting in meetings_to_scrape.to_dict('records'):
+                board_name = meeting['board_name']
+                meeting_url = meeting['details_url']
+                meeting_date = meeting['date']
+                logger.info(f"Scraping meeting for {board_name}: {meeting_url}")
+                result = self.scrape_meeting(board_name, meeting_url, meeting_date)
+                if result:
+                    meeting_data.append(result)
 
         if meeting_data:
             self.save_meeting_data(meeting_data)
+            logger.info(f"Scraped {len(meeting_data)} meetings successfully")
+        else:
+            logger.warning("No meeting data scraped")
+
         return meeting_data
+
+    def _get_all_boards(self):
+        """Get list of all board directories in data_dir."""
+        try:
+            board_dirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
+            logger.debug(f"Found board directories: {board_dirs}")
+            return board_dirs
+        except Exception as e:
+            logger.error(f"Error listing board directories in {self.data_dir}: {e}")
+            return []
 
     def scrape_meeting(self, board_name, meeting_url, meeting_date):
         logger.info(f"Scraping meeting: {meeting_url}")
@@ -76,10 +102,13 @@ class MeetingScraper:
             screenshot_data = {}
             if self.screenshots_enabled:
                 date_prefix = meeting_date.split(' ')[0].replace('-', '')
-                png_path, pdf_path = take_full_screenshot(self.driver, meeting_dir, self.config, prefix=f"meeting_{date_prefix}")
+                prefix = f"meeting_{board_name.replace(' ', '_')}_{date_prefix}"
+                png_path, pdf_path = take_full_screenshot(self.driver, meeting_dir, self.config, prefix=prefix)
                 if png_path and pdf_path:
                     screenshot_data = {'png': png_path, 'pdf': pdf_path}
                     logger.info(f"Screenshot saved: PNG={png_path}, PDF={pdf_path}")
+                else:
+                    logger.error(f"Failed to save screenshot for {prefix}")
             
             iframe_exists = has_iframe(self.driver, 'content')
             if iframe_exists:
@@ -123,7 +152,8 @@ class MeetingScraper:
                 EC.presence_of_element_located((By.CSS_SELECTOR, selector))
             )
             return element.text.strip()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to get text for selector {selector}: {e}")
             return ''
 
     def _download_document(self, url, name, meeting_dir):
@@ -158,7 +188,7 @@ class MeetingScraper:
         if not meetings:
             logger.warning("No meeting data to save")
             return
-        csv_path = self.config['meetings_output_csv']
+        csv_path = self.output_csv
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['url', 'date', 'title', 'location', 'status', 'documents', 'screenshots'])
@@ -178,6 +208,8 @@ def main():
             logger.info("Meeting scraping completed successfully")
         else:
             logger.error("Meeting scraping failed")
+    except Exception as e:
+        logger.error(f"Meeting scraping failed: {e}", exc_info=True)
     finally:
         scraper.close()
 

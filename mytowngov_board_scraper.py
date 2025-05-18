@@ -33,16 +33,14 @@ class BoardScraper:
             logger.debug(f"Logging page state ({context})")
             logger.debug(f"Current URL: {self.driver.current_url}")
             logger.debug(f"Page title: {self.driver.title}")
-            # Log iframe content if present
             if has_iframe(self.driver, "content"):
                 self.driver.switch_to.frame("content")
-                iframe_content = self.driver.page_source[:1000]  # Limit to avoid huge logs
+                iframe_content = self.driver.page_source[:1000]
                 logger.debug(f"Iframe content (first 1000 chars): {iframe_content}")
                 self.driver.switch_to.default_content()
             else:
                 page_content = self.driver.page_source[:1000]
                 logger.debug(f"Page content (first 1000 chars): {page_content}")
-            # Check for JavaScript errors
             logs = self.driver.get_log("browser")
             if logs:
                 logger.debug(f"Browser console logs: {logs}")
@@ -52,14 +50,10 @@ class BoardScraper:
     def _scrape_board_details(self):
         details = {'name': '', 'chair': '', 'clerk': ''}
         try:
-            # Log page state before scraping
             self._log_page_state("before scraping board details")
-
-            # Wait for the page to be fully loaded by checking for a key element
             self.wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            time.sleep(2)  # Additional wait for JavaScript rendering
+            time.sleep(2)
 
-            # Try multiple selectors for the board name
             selectors = [
                 (By.TAG_NAME, 'h1'),
                 (By.XPATH, "//h1"),
@@ -80,14 +74,11 @@ class BoardScraper:
                 logger.error("Could not find board name with any selector")
                 return details
 
-            # Extract chair and clerk from the members section
             try:
-                # Look for the "Members" section directly in the text
                 members_section = self.driver.find_element(By.XPATH, "//*[contains(text(), 'Members:')]")
                 members_text = members_section.text.strip()
                 logger.debug(f"Found members section: {members_text}")
 
-                # Parse chair and clerk from the members list
                 members_lines = members_text.split('\n')
                 for line in members_lines:
                     if "Chair" in line:
@@ -98,7 +89,6 @@ class BoardScraper:
                         clerk_name = line.split(', Clerk')[0].strip()
                         details['clerk'] = clerk_name
                         logger.debug(f"Found clerk: {details['clerk']}")
-                    # If clerk is not in members, look for it in the "Clerk" field
                     if not details['clerk']:
                         try:
                             clerk_element = self.driver.find_element(By.XPATH, "//*[contains(text(), 'Clerk:')]")
@@ -121,122 +111,208 @@ class BoardScraper:
 
     def _parse_date(self, date_str):
         try:
-            # Handle multi-line date strings (e.g., "May 22, 2025\n6:30 PM EDT")
-            date_str = date_str.replace('\n', ' ')
-            return datetime.datetime.strptime(date_str, "%b %d, %Y %I:%M %p %Z")
-        except ValueError as e:
+            date_str = date_str.replace('\n', ' ').strip()
+            formats = [
+                "%b %d, %Y %I:%M %p %Z",
+                "%b %d, %Y %I:%M %p",
+                "%B %d, %Y %I:%M %p",
+                "%Y-%m-%d %H:%M:%S",
+                "%B %d, %Y"
+            ]
+            for fmt in formats:
+                try:
+                    return datetime.datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+            logger.error(f"Could not parse date '{date_str}' with any format")
+            return None
+        except Exception as e:
             logger.error(f"Error parsing date '{date_str}': {e}")
             return None
 
     def _scrape_meetings(self, board_name):
         meetings = []
+        seen_meetings = set()
         try:
-            # Log page state before scraping meetings
             self._log_page_state("before scraping meetings")
+            self.wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+            time.sleep(3)
 
-            # Try multiple selectors for the Meetings sections
-            selectors = [
-                (By.XPATH, "//*[contains(text(), 'Regular Meetings')]"),
-                (By.XPATH, "//*[contains(text(), 'Upcoming Meetings')]"),
-                (By.XPATH, "//*[contains(text(), 'Past Meetings')]"),
-                (By.XPATH, "//*[contains(text(), 'Planning Board Upcoming Meetings')]")
+            # Aggressive scrolling to load all content
+            logger.debug("Scrolling to load all meetings")
+            max_scroll_attempts = 5
+            for attempt in range(max_scroll_attempts):
+                last_height = self.driver.execute_script("return document.body.scrollHeight")
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(3)
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                logger.debug(f"Scroll attempt {attempt + 1}/{max_scroll_attempts}: height {last_height} -> {new_height}")
+                if new_height == last_height:
+                    break
+
+            # Save pre-parse HTML for debugging
+            debug_path = os.path.join(self.data_dir, board_name, "debug", f"meetings_page_{int(time.time())}.html")
+            os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(self.driver.page_source)
+            logger.info(f"Saved meetings page HTML: {debug_path}")
+
+            # Ensure iframe context
+            iframe_exists = has_iframe(self.driver, "content")
+            if iframe_exists:
+                self.driver.switch_to.frame("content")
+                logger.debug("Switched to content iframe for meetings")
+            else:
+                logger.warning("No content iframe found for meetings")
+
+            # Log all h2 elements for debugging
+            try:
+                h2_elements = self.driver.find_elements(By.TAG_NAME, "h2")
+                logger.debug(f"Found {len(h2_elements)} h2 elements")
+                for idx, h2 in enumerate(h2_elements):
+                    logger.debug(f"h2[{idx}]: {h2.text.strip()}")
+            except Exception as e:
+                logger.debug(f"Error logging h2 elements: {e}")
+
+            # Target the Past Meetings table
+            table_selectors = [
+                (By.XPATH, "//table[preceding-sibling::h2[contains(text(), 'Past Meetings')]]"),
+                (By.XPATH, "//table[contains(., 'Minutes Available')]"),
+                (By.XPATH, "//table[preceding-sibling::h2[contains(text(), 'Past Meetings')]]/following::table[1]")
             ]
-            headings = []
-            for by, value in selectors:
+            past_meetings_table = None
+            for by, value in table_selectors:
                 try:
-                    elements = self.driver.find_elements(by, value)
-                    headings.extend(elements)
-                    logger.debug(f"Found {len(elements)} elements using {by}='{value}'")
-                except Exception as e:
-                    logger.debug(f"Selector {by}='{value}' failed: {e}")
+                    past_meetings_table = self.wait.until(EC.presence_of_element_located((by, value)))
+                    logger.debug(f"Found Past Meetings table using {by}='{value}'")
+                    break
+                except TimeoutException:
+                    logger.debug(f"Selector {by}='{value}' failed to find Past Meetings table")
 
-            if not headings:
-                logger.warning("No meetings sections found with any selector")
-                self._log_page_state("after failing to find Meetings section")
-                return meetings
+            if past_meetings_table:
+                rows = past_meetings_table.find_elements(By.TAG_NAME, "tr")[1:]  # Skip header
+                logger.debug(f"Found {len(rows)} rows in Past Meetings table")
 
-            for heading in headings:
-                heading_text = heading.text.strip()
-                logger.debug(f"Found meetings section: {heading_text}")
+                for row in rows:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 5:  # Time, Location, Minutes, Other Documents, Details
+                        date_str = cells[0].text.strip()
+                        location = cells[1].text.strip()
+                        status = "Cancelled" if "Cancelled" in location else "Scheduled"
+                        details_url = cells[4].find_element(By.TAG_NAME, "a").get_attribute("href")
 
-                # Handle "Regular Meetings" section (table-based)
-                if "Regular Meetings" in heading_text:
-                    try:
-                        table = heading.find_element(By.XPATH, "following-sibling::table")
-                        rows = table.find_elements(By.TAG_NAME, "tr")[1:]  # Skip header row
-                        logger.debug(f"Found {len(rows)} meeting rows in section '{heading_text}'")
+                        logger.debug(f"Processing row: date='{date_str}', location='{location}', status='{status}', details_url='{details_url}'")
 
-                        for row in rows:
-                            cells = row.find_elements(By.TAG_NAME, "td")
-                            if len(cells) >= 4:
-                                # First cell is the board name, second cell is the date
-                                meeting_board = cells[0].text.strip()
-                                date_str = cells[1].text.strip()
-                                location = cells[2].text.strip()
-                                details_link = cells[3].find_element(By.TAG_NAME, "a").get_attribute("href")
-
-                                date = self._parse_date(date_str)
-                                if date:
-                                    meetings.append({
-                                        "board_name": meeting_board,
-                                        "date": date,
-                                        "location": location,
-                                        "status": "Scheduled",
-                                        "details_url": details_link
-                                    })
-                                    logger.debug(f"Scraped meeting: {meeting_board}, {date_str}, {location}, Scheduled, {details_link}")
-                    except NoSuchElementException:
-                        logger.debug(f"No table found for section '{heading_text}'")
-                        continue
-
-                # Handle "Upcoming Meetings", "Past Meetings", and "Planning Board Upcoming Meetings" sections
-                else:
-                    try:
-                        # Get all elements following the heading until the next section
-                        next_elements = heading.find_elements(By.XPATH, "following-sibling::*")
-                        meeting_data = []
-                        current_meeting = {}
-                        for elem in next_elements:
-                            elem_text = elem.text.strip()
-                            # Stop if we reach another section heading
-                            if any(section in elem_text for section in ["Upcoming Meetings", "Past Meetings", "Planning Board Upcoming Meetings", "Subcommittees"]):
-                                break
-                            if not elem_text:
-                                continue
-
-                            # Look for a pattern: Board Name, Date, Location, Details
-                            if "Details and Agenda" in elem_text:
-                                if current_meeting:
-                                    meeting_data.append(current_meeting)
-                                    current_meeting = {}
-                                continue
-                            elif any(month in elem_text for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]):
-                                current_meeting['date'] = elem_text
-                            elif "Myron E. Richardson" in elem_text or "Town House" in elem_text or "Cancelled" in elem_text:
-                                current_meeting['location'] = elem_text
-                            elif elem.tag_name == "a" and "meeting" in elem.get_attribute("href"):
-                                current_meeting['details_url'] = elem.get_attribute("href")
-                            else:
-                                current_meeting['board_name'] = elem_text
-
-                        # Process collected meeting data
-                        for meeting in meeting_data:
-                            if not all(key in meeting for key in ['board_name', 'date', 'location', 'details_url']):
-                                continue
-                            date = self._parse_date(meeting['date'])
-                            status = "Cancelled" if "Cancelled" in meeting['location'] else "Scheduled"
-                            if date:
+                        date = self._parse_date(date_str)
+                        if date:
+                            meeting_key = (board_name, date_str, details_url)
+                            if meeting_key not in seen_meetings:
+                                seen_meetings.add(meeting_key)
                                 meetings.append({
-                                    "board_name": meeting['board_name'],
+                                    "board_name": board_name,
                                     "date": date,
-                                    "location": meeting['location'],
+                                    "location": location,
                                     "status": status,
-                                    "details_url": meeting['details_url']
+                                    "details_url": details_url
                                 })
-                                logger.debug(f"Scraped meeting: {meeting['board_name']}, {meeting['date']}, {meeting['location']}, {status}, {meeting['details_url']}")
-                    except Exception as e:
-                        logger.debug(f"Error parsing section '{heading_text}': {e}")
+                                logger.debug(f"Scraped past meeting: {board_name}, {date_str}, {location}, {status}, {details_url}")
+                        else:
+                            logger.warning(f"Failed to parse date: {date_str}")
+                    else:
+                        logger.warning(f"Skipping row with {len(cells)} cells: {[cell.text for cell in cells]}")
+            else:
+                logger.warning("Past Meetings table not found")
+                self._log_page_state("after failing to find past meetings table")
+
+            # Save HTML for upcoming meetings debugging
+            debug_upcoming_path = os.path.join(self.data_dir, board_name, "debug", f"upcoming_meetings_{int(time.time())}.html")
+            os.makedirs(os.path.dirname(debug_upcoming_path), exist_ok=True)
+            with open(debug_upcoming_path, "w", encoding="utf-8") as f:
+                f.write(self.driver.page_source)
+            logger.info(f"Saved upcoming meetings HTML: {debug_upcoming_path}")
+
+            # Target the Upcoming Meetings section (non-table)
+            upcoming_selectors = [
+                (By.XPATH, "//h2[contains(., 'Upcoming')]"),
+                (By.XPATH, "//h2[contains(text(), 'Upcoming Meetings')]"),
+                (By.XPATH, "//div[contains(@class, 'upcoming')]"),
+                (By.XPATH, "//*[contains(text(), 'Upcoming Meetings')]")
+            ]
+            upcoming_section = None
+            for by, value in upcoming_selectors:
+                try:
+                    upcoming_section = self.wait.until(EC.presence_of_element_located((by, value)))
+                    logger.debug(f"Found Upcoming Meetings section using {by}='{value}'")
+                    break
+                except TimeoutException:
+                    logger.debug(f"Selector {by}='{value}' failed to find Upcoming Meetings section")
+
+            if upcoming_section:
+                parent = upcoming_section.find_element(By.XPATH, "..")
+                elements = parent.find_elements(By.XPATH, ".//*[self::p or self::div or self::span or self::a]")
+                current_meeting = {'board_name': board_name}
+                logger.debug(f"Processing {len(elements)} non-table elements in Upcoming Meetings")
+
+                for idx, elem in enumerate(elements):
+                    elem_text = elem.text.strip()
+                    if not elem_text:
                         continue
+
+                    logger.debug(f"Element {idx}: tag={elem.tag_name}, text='{elem_text}', href={elem.get_attribute('href') or 'None'}")
+
+                    if any(keyword in elem_text for keyword in [
+                        "Past Meetings", "Regular Meetings", "Subcommittees"
+                    ]):
+                        if current_meeting.get('date') and current_meeting.get('details_url'):
+                            date = self._parse_date(current_meeting['date'])
+                            if date:
+                                status = "Cancelled" if "Cancelled" in current_meeting.get('location', '') else "Scheduled"
+                                meeting_key = (current_meeting['board_name'], current_meeting['date'], current_meeting['details_url'])
+                                if meeting_key not in seen_meetings:
+                                    seen_meetings.add(meeting_key)
+                                    meetings.append({
+                                        "board_name": current_meeting['board_name'],
+                                        "date": date,
+                                        "location": current_meeting.get('location', ''),
+                                        "status": status,
+                                        "details_url": current_meeting['details_url']
+                                    })
+                                    logger.debug(f"Scraped upcoming meeting: {current_meeting}")
+                        else:
+                            logger.debug(f"Discarded incomplete meeting: {current_meeting}")
+                        current_meeting = {'board_name': board_name}
+                        continue
+
+                    if "Details and Agenda" in elem_text:
+                        continue
+                    elif any(month in elem_text for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]):
+                        current_meeting['date'] = elem_text
+                    elif any(loc in elem_text for loc in ["Myron E. Richardson", "Town House", "Cancelled", "Assessor's", "Conference room"]):
+                        current_meeting['location'] = elem_text
+                    elif elem.tag_name == "a" and elem.get_attribute("href"):
+                        href = elem.get_attribute("href")
+                        if "meeting" in href.lower():
+                            current_meeting['details_url'] = href
+
+                # Finalize last meeting
+                if current_meeting.get('date') and current_meeting.get('details_url'):
+                    date = self._parse_date(current_meeting['date'])
+                    if date:
+                        status = "Cancelled" if "Cancelled" in current_meeting.get('location', '') else "Scheduled"
+                        meeting_key = (current_meeting['board_name'], current_meeting['date'], current_meeting['details_url'])
+                        if meeting_key not in seen_meetings:
+                            seen_meetings.add(meeting_key)
+                            meetings.append({
+                                "board_name": current_meeting['board_name'],
+                                "date": date,
+                                "location": current_meeting.get('location', ''),
+                                "status": status,
+                                "details_url": current_meeting['details_url']
+                            })
+                            logger.debug(f"Scraped final upcoming meeting: {current_meeting}")
+            else:
+                logger.warning("Upcoming Meetings section not found")
+                self._log_page_state("after failing to find upcoming meetings section")
 
         except Exception as e:
             logger.error(f"Error scraping meetings: {e}")
@@ -244,20 +320,24 @@ class BoardScraper:
             os.makedirs(os.path.dirname(debug_path), exist_ok=True)
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
-            logger.info(f"Saved debug HTML for meetings: {debug_path}")
+            logger.info(f"Saved debug HTML for meetings error: {debug_path}")
             self._log_page_state("after meetings scrape failure")
 
+        finally:
+            if iframe_exists:
+                self.driver.switch_to.default_content()
+                logger.debug("Switched back to default content after meetings")
+
+        logger.info(f"Total meetings scraped for {board_name}: {len(meetings)}")
         return meetings
 
     def scrape_board(self, board_name, board_url):
-        logger.info(f"Scraping board: {board_name}")
+        logger.info(f"Scraping board: {board_name} at {board_url}")
         board_dir = os.path.join(self.data_dir, board_name)
         os.makedirs(board_dir, exist_ok=True)
 
-        # Fetch the board page
         content = fetch_page(self.driver, board_url, self.cache, bypass_cache=self.bypass_cache)
 
-        # Switch to content iframe
         iframe_exists = has_iframe(self.driver, "content")
         if iframe_exists:
             self.driver.switch_to.frame("content")
@@ -265,24 +345,21 @@ class BoardScraper:
         else:
             logger.warning("No content iframe found")
 
-        # Log initial page state
         self._log_page_state("after loading board page")
 
-        # Scrape board details
         details = self._scrape_board_details()
         logger.info(f"Board details: name={details['name']}, chair={details['chair']}, clerk={details['clerk']}")
 
-        # Save debug HTML of the board page
         debug_path = os.path.join(board_dir, "debug", f"board_{board_name}_{int(time.time())}.html")
         os.makedirs(os.path.dirname(debug_path), exist_ok=True)
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(self.driver.page_source)
         logger.info(f"Saved board debug HTML: {debug_path}")
 
-        # Take screenshot if enabled
         if self.screenshots_enabled:
             try:
-                png_path, pdf_path = take_full_screenshot(self.driver, board_dir, self.config, prefix=f"board_{board_name}")
+                prefix = f"boardscraper_{board_name.replace(' ', '_')}"
+                png_path, pdf_path = take_full_screenshot(self.driver, board_dir, self.config, prefix=prefix)
                 if png_path and pdf_path:
                     logger.info(f"Board screenshot saved: PNG={png_path}, PDF={pdf_path}")
                 else:
@@ -290,11 +367,9 @@ class BoardScraper:
             except Exception as e:
                 logger.error(f"Error taking board screenshot: {e}")
 
-        # Scrape meetings
         meetings = self._scrape_meetings(board_name)
         logger.info(f"Scraped {len(meetings)} meetings for board {board_name}")
 
-        # Save meetings to CSV
         if meetings:
             df_meetings = pd.DataFrame(meetings)
             meeting_csv = os.path.join(board_dir, "board_meeting_data.csv")
@@ -304,7 +379,6 @@ class BoardScraper:
         else:
             logger.warning(f"No meetings to save for {board_name}")
 
-        # Switch back to default content
         if iframe_exists:
             self.driver.switch_to.default_content()
             logger.debug("Switched back to default content")
@@ -320,6 +394,10 @@ class BoardScraper:
             board_name = row['Name']
             board_url = row['URL']
 
+            if not isinstance(board_name, str) or pd.isna(board_name):
+                logger.warning(f"Skipping invalid board name: {board_name}")
+                continue
+
             if self.focus_mode and board_name != self.focus_board:
                 logger.info(f"Skipping board {board_name} (focus mode enabled for {self.focus_board})")
                 continue
@@ -332,7 +410,6 @@ class BoardScraper:
         self.driver.quit()
 
 def main():
-    # For debugging, disable headless mode and bypass cache
     scraper = BoardScraper(headless=False, bypass_cache=True)
     try:
         scraper.scrape()

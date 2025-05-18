@@ -32,5 +32,5 @@ focus_board: "Planning Board"
 meetings_input_csv: "Hardwick_Data/board_meetings.csv"
 meetings_output_csv: "Hardwick_Data/meeting_details.csv"
 attachments_dir: "Hardwick_Data/attachments"
-focus_mode_meetings: true
+focus_mode_meetings: false
 focus_date: "2024-09-10"
