@@ -47,7 +47,7 @@ def main():
     board_scraper = None
     try:
         board_scraper = BoardScraper(config_path)
-        board_scraper.scrape_boards()
+        board_scraper.scrape()
     except Exception as e:
         logging.error(f"Board scraping failed: {e}")
         raise
@@ -60,7 +60,7 @@ def main():
     meeting_scraper = None
     try:
         meeting_scraper = MeetingScraper(config_path)
-        meeting_scraper.scrape_meetings()
+        meeting_scraper.scrape()
     except Exception as e:
         logging.error(f"Meeting scraping failed: {e}")
         raise

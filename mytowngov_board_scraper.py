@@ -6,7 +6,7 @@ import pandas as pd
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 import time
 import datetime
 import sys
@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 class BoardScraper:
     def __init__(self, config_path='config.yaml', headless=True, bypass_cache=True):
         self.config = load_config(config_path)
-        self.base_url = self.config['homepage_url']
+        self.base_url = self.config['base_url']
         self.data_dir = self.config['data_dir']
         self.use_cache = self.config.get('use_cache', True)
         self.cache = Cache(self.config)
         self.driver = setup_driver(headless=headless)
-        self.wait = WebDriverWait(self.driver, 20)
+        self.wait = WebDriverWait(self.driver, 15)
         self.screenshots_enabled = self.config.get('screenshots', {}).get('enabled', True)
         self.focus_mode = self.config.get('focus_mode_boards', False)
         self.focus_board = self.config.get('focus_board', None)
@@ -34,30 +34,16 @@ class BoardScraper:
             logger.debug(f"Logging page state ({context})")
             logger.debug(f"Current URL: {self.driver.current_url}")
             logger.debug(f"Page title: {self.driver.title}")
-            if has_iframe(self.driver, "content"):
-                try:
-                    self.driver.switch_to.frame("content")
-                    iframe_content = self.driver.page_source[:1000]
-                    logger.debug(f"Iframe content (first 1000 chars): {iframe_content}")
-                except Exception as e:
-                    logger.error(f"Error accessing content iframe: {e}")
-                finally:
-                    self.driver.switch_to.default_content()
-            else:
-                page_content = self.driver.page_source[:1000]
-                logger.debug(f"Page content (first 1000 chars): {page_content}")
-            logs = self.driver.get_log("browser")
-            if logs:
-                logger.debug(f"Browser console logs: {logs}")
+            page_content = self.driver.page_source[:1000]
+            logger.debug(f"Page content (first 1000 chars): {page_content}")
         except Exception as e:
             logger.error(f"Error logging page state: {e}")
 
     def _scrape_board_details(self):
         details = {'name': '', 'chair': '', 'clerk': ''}
         try:
-            self._log_page_state("before scraping board details")
             self.wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            time.sleep(2)
+            time.sleep(1)
 
             selectors = [
                 (By.TAG_NAME, 'h1'),
@@ -140,28 +126,23 @@ class BoardScraper:
         meetings = []
         seen_meetings = set()
         try:
-            self._log_page_state("before scraping meetings")
-
-            # Ensure we're in the content iframe
             iframe_exists = has_iframe(self.driver, "content")
             if iframe_exists:
                 try:
                     self.driver.switch_to.frame("content")
                     logger.debug("Switched to content iframe for meetings")
                 except Exception as e:
-                    logger.error(f"Failed to switch to content iframe for meetings: {e}")
+                    logger.warning(f"Failed to switch to content iframe: {e}")
                     iframe_exists = False
-            else:
-                logger.warning("No content iframe found for meetings")
 
             self.wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            time.sleep(6)  # Increased sleep for dynamic content
+            time.sleep(2)
 
-            logger.debug("Scrolling to bottom of page to load all content")
+            logger.debug("Scrolling to load content")
             last_height = self.driver.execute_script("return document.body.scrollHeight")
-            for _ in range(5):
+            for _ in range(3):  # Reduced iterations
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(4)  # Increased sleep
+                time.sleep(2)  # Reduced wait time
                 new_height = self.driver.execute_script("return document.body.scrollHeight")
                 if new_height == last_height:
                     break
@@ -174,17 +155,12 @@ class BoardScraper:
                 f.write(self.driver.page_source)
             logger.info(f"Saved meetings page HTML: {debug_path}")
 
-            page_source_truncated = self.driver.page_source[:2000]
-            logger.debug(f"Page source (first 2000 chars): {page_source_truncated}")
-
             selectors = [
                 (By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'past meetings')]"),
                 (By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'upcoming meetings')]"),
                 (By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'planning board upcoming meetings')]"),
                 (By.XPATH, "//h4[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'meetings')]"),
-                (By.XPATH, "//*[contains(text(), 'Meetings')]"),
-                (By.ID, "Upcoming"),
-                (By.ID, "Past")
+                (By.XPATH, "//*[contains(text(), 'Meetings')]")
             ]
             headings = []
             for by, value in selectors:
@@ -196,39 +172,49 @@ class BoardScraper:
                     logger.debug(f"Selector {by}='{value}' failed: {e}")
 
             if not headings:
-                logger.warning("No meetings sections found with any selector")
+                logger.warning("No meetings sections found, checking for tables")
+                try:
+                    tables = self.driver.find_elements(By.TAG_NAME, "table")
+                    if tables:
+                        logger.debug(f"Found {len(tables)} tables as fallback")
+                        headings = tables
+                except Exception as e:
+                    logger.error(f"Error finding fallback tables: {e}")
+
+            if not headings:
+                logger.warning("No meetings sections or tables found")
                 self._log_page_state("after failing to find Meetings section")
                 return meetings
 
             for heading in headings:
-                heading_text = heading.text.strip()
-                logger.info(f"Processing meetings section: {heading_text}")
-
                 try:
-                    table = heading.find_element(By.XPATH, "following::table[1]")
-                    logger.debug(f"Found table for section '{heading_text}'")
-                    
-                    table_html = table.get_attribute('outerHTML')
-                    logger.debug(f"Table HTML: {table_html}")
+                    heading_text = heading.text.strip() if heading.text else "Unnamed Section"
+                    logger.info(f"Processing meetings section: {heading_text}")
 
+                    try:
+                        table = heading.find_element(By.XPATH, "following::table[1]")
+                    except NoSuchElementException:
+                        table = heading if heading.tag_name == "table" else None
+                    if not table:
+                        logger.debug(f"No table found for section '{heading_text}'")
+                        continue
+
+                    logger.debug(f"Found table for section '{heading_text}'")
                     rows = table.find_elements(By.TAG_NAME, "tr")[1:]
                     logger.debug(f"Found {len(rows)} meeting rows in section '{heading_text}'")
 
                     for idx, row in enumerate(rows):
                         try:
-                            row_html = row.get_attribute('outerHTML')
-                            logger.debug(f"Row {idx} HTML: {row_html}")
-
                             cells = row.find_elements(By.TAG_NAME, "td")
                             logger.debug(f"Row {idx} has {len(cells)} cells")
 
-                            if len(cells) >= 5:  # Past Meetings (Date, Location, Minutes, Other Docs, Details)
+                            if len(cells) >= 5:  # Past Meetings
                                 date_str = cells[0].text.strip()
                                 location = cells[1].text.strip()
                                 minutes = cells[2].text.strip()
                                 other_docs = cells[3].text.strip()
                                 details_cell = cells[4]
-                            elif len(cells) >= 4:  # Upcoming Meetings (Board Name, Time, Location, Details)
+                            elif len(cells) >= 4:  # Upcoming Meetings
                                 row_board_name = cells[0].text.strip()
                                 date_str = cells[1].text.strip()
                                 location = cells[2].text.strip()
@@ -236,7 +222,7 @@ class BoardScraper:
                                 other_docs = ""
                                 details_cell = cells[3]
                             else:
-                                logger.warning(f"Row {idx} has insufficient cells ({len(cells)}): {row_html}")
+                                logger.warning(f"Row {idx} has insufficient cells ({len(cells)})")
                                 continue
 
                             try:
@@ -250,13 +236,6 @@ class BoardScraper:
                             if not date:
                                 logger.warning(f"Row {idx}: Failed to parse date '{date_str}'")
                                 continue
-
-                            logger.debug(f"Row {idx}: Parsed date '{date_str}' as {date}")
-
-                            date_only = date.date()
-                            target_date = datetime.datetime.strptime("Sep 10, 2024", "%b %d, %Y").date()
-                            if date_only == target_date:
-                                logger.info(f"Found meeting on Sep 10, 2024: {date_str}, {location}, {details_url}")
 
                             status = "Cancelled" if "Cancelled" in location else "Scheduled"
                             meeting_key = (board_name, date_str, details_url)
@@ -279,9 +258,6 @@ class BoardScraper:
                             logger.error(f"Error processing row {idx} in section '{heading_text}': {e}")
                             continue
 
-                except NoSuchElementException:
-                    logger.debug(f"No table found for section '{heading_text}'")
-                    continue
                 except Exception as e:
                     logger.error(f"Error parsing section '{heading_text}': {e}")
                     continue
@@ -344,7 +320,7 @@ class BoardScraper:
         logger.info(f"Saved board debug HTML: {debug_path}")
 
         if self.screenshots_enabled:
-            wait_selector = (By.TAG_NAME, "h1")  # More reliable selector
+            wait_selector = (By.TAG_NAME, "h1")
             png_path, pdf_path = capture_screenshot(
                 self.driver, board_dir, self.config, prefix="board", board_name=board_name, wait_selector=wait_selector
             )
@@ -361,7 +337,7 @@ class BoardScraper:
             meeting_csv = os.path.join(board_dir, "board_meeting_data.csv")
             os.makedirs(os.path.dirname(meeting_csv), exist_ok=True)
             df_meetings.to_csv(meeting_csv, index=False)
-            logger.info(f"Saved meeting CSV for {board_name}: {meeting_csv}")
+            logger.info(f"Saved per-board meeting CSV for {board_name}: {meeting_csv}")
         else:
             logger.warning(f"No meetings to save for {board_name}")
 
@@ -372,8 +348,10 @@ class BoardScraper:
             except Exception as e:
                 logger.error(f"Error switching back to default content: {e}")
 
+        return meetings
+
     def scrape(self):
-        boards_csv = self.config['homepage_boards_csv']
+        boards_csv = self.config['boards_input_csv']
         if not os.path.exists(boards_csv):
             error_msg = f"Source CSV file not found: {boards_csv}. Please run the homepage scraper (mytowngov_homepage_scraper.py) first to generate the required board data."
             logger.error(error_msg)

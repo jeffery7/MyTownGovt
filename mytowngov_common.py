@@ -10,7 +10,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from PIL import Image
 import img2pdf
 import requests
@@ -134,8 +134,20 @@ def take_full_screenshot(driver, screenshot_dir, config, prefix='screenshot', bo
         png_path = os.path.join(screenshot_dir, f"{filename_base}.png")
         pdf_path = os.path.join(screenshot_dir, f"{filename_base}.pdf")
 
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        max_height = last_height
+        # Calculate height based on visible content (div.content)
+        try:
+            content_element = driver.find_element(By.CSS_SELECTOR, "div.content")
+            # Use getBoundingClientRect to get the actual rendered height, including children
+            content_height = driver.execute_script(
+                "return arguments[0].getBoundingClientRect().bottom", content_element
+            )
+            logger.debug(f"Visible content height (div.content): {content_height}")
+        except NoSuchElementException:
+            logger.warning("Could not find div.content, falling back to document.body.scrollHeight")
+            content_height = driver.execute_script("return document.body.scrollHeight")
+            logger.debug(f"Fallback content height (document.body.scrollHeight): {content_height}")
+
+        max_height = content_height
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         for iframe in iframes:
             try:
@@ -148,15 +160,30 @@ def take_full_screenshot(driver, screenshot_dir, config, prefix='screenshot', bo
                 logger.debug(f"Error getting iframe height: {e}")
                 driver.switch_to.default_content()
 
-        content_width = driver.execute_script("return document.body.scrollWidth")
+        # Ensure a minimum height to avoid overly small screenshots
+        max_height = max(max_height, 600)
+        logger.debug(f"Final content height: {max_height}")
+
+        # Calculate content width based on visible content (div.content)
+        try:
+            content_element = driver.find_element(By.CSS_SELECTOR, "div.content")
+            content_width = driver.execute_script("return arguments[0].offsetWidth", content_element)
+            logger.debug(f"Visible content width (div.content): {content_width}")
+        except NoSuchElementException:
+            logger.warning("Could not find div.content, falling back to document.body.scrollWidth")
+            content_width = driver.execute_script("return document.body.scrollWidth")
+            logger.debug(f"Fallback content width (document.body.scrollWidth): {content_width}")
+
+        # Ensure the viewport width matches the content width, with a minimum of 1200px (consistent with homepage)
         viewport_width = max(content_width, 1200)
-        logger.debug(f"Content width: {content_width}, setting viewport width to: {viewport_width}")
+        logger.debug(f"Setting viewport width to: {viewport_width}")
 
         driver.execute_script("window.scrollTo(0, 0);")
         logger.debug("Scrolled back to top of page")
 
-        driver.set_window_size(viewport_width, max_height + 100)
-        logger.debug(f"Window size set to {viewport_width}x{max_height + 100}")
+        # Add a small buffer (100px) to the height to ensure all content is captured
+        driver.set_window_size(viewport_width, int(max_height) + 100)
+        logger.debug(f"Window size set to {viewport_width}x{int(max_height) + 100}")
 
         driver.save_screenshot(png_path)
         logger.info(f"Saved PNG screenshot: {png_path}")

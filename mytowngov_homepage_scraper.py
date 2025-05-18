@@ -20,7 +20,7 @@ class HomepageScraper:
         self.data_dir = self.config['data_dir']
         self.use_cache = self.config.get('use_cache', True)
         self.cache = Cache(self.config)
-        self.driver = setup_driver()
+        self.driver = setup_driver(headless=True)
         self.wait = WebDriverWait(self.driver, 20)
         self.screenshots_enabled = self.config.get('screenshots', {}).get('enabled', True)
         self.board_dir = os.path.join(self.data_dir, 'homepage')
@@ -116,7 +116,7 @@ class HomepageScraper:
         else:
             logger.warning("No data to save for homepage_outside_agencies.csv")
 
-        logger.info("Homepage scraping ATL completed")
+        logger.info("Homepage scraping completed")
 
     def close(self):
         try:
