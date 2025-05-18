@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
-from mytowngov_common import load_config, setup_driver, fetch_page, take_full_screenshot, Cache, has_iframe
+from mytowngov_common import load_config, setup_driver, fetch_page, capture_screenshot, Cache, has_iframe
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -18,6 +18,7 @@ class HomepageScraper:
         self.config = load_config(config_path)
         self.base_url = self.config['homepage_url']
         self.data_dir = self.config['data_dir']
+        self.use_cache = self.config.get('use_cache', True)
         self.cache = Cache(self.config)
         self.driver = setup_driver()
         self.wait = WebDriverWait(self.driver, 20)
@@ -30,22 +31,18 @@ class HomepageScraper:
         boards = []
 
         try:
-            # Check for content iframe and switch to it
             logger.debug("Waiting for content iframe to be present")
             iframe = self.wait.until(EC.presence_of_element_located((By.NAME, 'content')))
             logger.debug("Switching to content iframe")
             self.driver.switch_to.frame(iframe)
 
-            # Wait for the iframe content to load by checking for the heading
             logger.debug(f"Waiting for heading '{heading_text}' in iframe")
             heading = self.wait.until(EC.presence_of_element_located((By.XPATH, f"//h1[contains(text(), '{heading_text}')]")))
             logger.debug(f"Found heading: {heading_text}")
 
-            # Find the table following the heading
             table = heading.find_element(By.XPATH, "following-sibling::table")
             logger.debug("Located table")
 
-            # Find all rows in the table (skip the header row)
             rows = table.find_elements(By.TAG_NAME, "tr")[1:]
             logger.debug(f"Found {len(rows)} rows in {heading_text}")
 
@@ -55,7 +52,6 @@ class HomepageScraper:
                     if len(cells) >= 1:
                         link = cells[0].find_element(By.TAG_NAME, "a")
                         name = link.text.strip()
-                        # Remove "(inactive)" from the name if present
                         name = name.replace(" (inactive)", "")
                         url = link.get_attribute('href')
                         if name and url:
@@ -84,35 +80,21 @@ class HomepageScraper:
         boards_data = []
         agencies_data = []
 
-        # Load the page using fetch_page for caching
-        content = fetch_page(self.driver, self.base_url, self.cache)
+        content = fetch_page(self.driver, self.base_url, self.cache, bypass_cache=not self.use_cache)
 
         if self.screenshots_enabled:
-            try:
-                # Ensure we're in the correct context for the screenshot
-                logger.debug("Waiting for content iframe for screenshot")
-                iframe = self.wait.until(EC.presence_of_element_located((By.NAME, 'content')))
-                self.driver.switch_to.frame(iframe)
-                logger.debug("Switched to iframe for screenshot")
+            wait_selector = (By.XPATH, "//h1[contains(text(), 'Boards and Committees')]")
+            png_path, pdf_path = capture_screenshot(
+                self.driver, self.board_dir, self.config, prefix="homepage", wait_selector=wait_selector
+            )
+            if png_path and pdf_path:
+                logger.info(f"Saved screenshot: PNG={png_path}, PDF={pdf_path}")
+            else:
+                logger.error("Failed to save screenshot")
 
-                # Wait for some content to ensure the screenshot is meaningful
-                self.wait.until(EC.presence_of_element_located((By.XPATH, "//h1[contains(text(), 'Boards and Committees')]")))
-                png_path, pdf_path = take_full_screenshot(self.driver, self.board_dir, self.config, prefix="homepage")
-                if png_path and pdf_path:
-                    logger.info(f"Saved screenshot: PNG={png_path}, PDF={pdf_path}")
-                else:
-                    logger.error("Failed to save screenshot")
-            except Exception as e:
-                logger.error(f"Error taking screenshot: {e}")
-            finally:
-                self.driver.switch_to.default_content()
-                logger.debug("Switched back to default content after screenshot")
-
-        # Scrape Boards and Committees
         boards = self._scrape_dropdown("Boards and Committees")
         boards_data.extend(boards)
 
-        # Scrape Outside Agencies
         agencies = self._scrape_dropdown("Outside Agencies and Organizations")
         agencies_data.extend(agencies)
 
@@ -134,10 +116,13 @@ class HomepageScraper:
         else:
             logger.warning("No data to save for homepage_outside_agencies.csv")
 
-        logger.info("Homepage scraping completed")
+        logger.info("Homepage scraping ATL completed")
 
     def close(self):
-        self.driver.quit()
+        try:
+            self.driver.quit()
+        except Exception as e:
+            logger.error(f"Error closing driver: {e}")
 
 def main():
     scraper = HomepageScraper()

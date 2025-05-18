@@ -20,6 +20,7 @@ class MeetingScraper:
         self.config = load_config(config_path)
         logger.debug(f"Loaded configuration: {self.config}")
         self.data_dir = self.config['data_dir']
+        self.use_cache = self.config.get('use_cache', True)  # Respect use_cache setting
         self.cache = Cache(self.config)
         self.driver = setup_driver()
         self.wait = WebDriverWait(self.driver, 15)
@@ -97,18 +98,21 @@ class MeetingScraper:
             meeting_dir = os.path.join(board_dir, date_prefix)
             os.makedirs(meeting_dir, exist_ok=True)
 
-            content = fetch_page(self.driver, meeting_url, self.cache)
+            content = fetch_page(self.driver, meeting_url, self.cache, bypass_cache=not self.use_cache)
             
             screenshot_data = {}
             if self.screenshots_enabled:
-                date_prefix = meeting_date.split(' ')[0].replace('-', '')
-                prefix = f"meeting_{board_name.replace(' ', '_')}_{date_prefix}"
-                png_path, pdf_path = take_full_screenshot(self.driver, meeting_dir, self.config, prefix=prefix)
+                # Use updated take_full_screenshot with board_name and date
+                prefix = "meeting"
+                png_path, pdf_path = take_full_screenshot(
+                    self.driver, meeting_dir, self.config, 
+                    prefix=prefix, board_name=board_name, date_str=meeting_date
+                )
                 if png_path and pdf_path:
                     screenshot_data = {'png': png_path, 'pdf': pdf_path}
                     logger.info(f"Screenshot saved: PNG={png_path}, PDF={pdf_path}")
                 else:
-                    logger.error(f"Failed to save screenshot for {prefix}")
+                    logger.error(f"Failed to save screenshot for {prefix}_{board_name}_{meeting_date}")
             
             iframe_exists = has_iframe(self.driver, 'content')
             if iframe_exists:
@@ -160,7 +164,7 @@ class MeetingScraper:
         try:
             cache_key = self.cache.get_cache_key(url)
             cache_path = self.cache.cache_path(cache_key, ext='pdf')
-            if self.cache.is_cached(url):
+            if self.use_cache and self.cache.is_cached(url):
                 logger.info(f"Using cached document: {url}")
                 return cache_path
             

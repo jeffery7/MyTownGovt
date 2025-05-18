@@ -6,12 +6,13 @@ screenshot_dir: "Hardwick_Data/screenshots"
 log_file: "Hardwick_Data/scraper.log"
 error_log_file: "Hardwick_Data/errors.log"
 base_url: "https://www.mytowngovernment.org/01031"
+use_cache: true
 
 # Cache settings
 cache:
   enabled: true
   directory: "Hardwick_Data/cache"
-  ttl_hours: 24
+  ttl_hours: 1  # Reduced for debugging
 
 # Screenshot settings
 screenshots:
